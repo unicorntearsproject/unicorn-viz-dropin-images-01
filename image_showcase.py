@@ -12,6 +12,7 @@ Directory selection policy:
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from random import shuffle
 from typing import NamedTuple
@@ -25,6 +26,9 @@ log = logging.getLogger(__name__)
 
 
 _IMAGE_PACK_CACHE: dict[str, tuple[list[moderngl.Texture], list[tuple[int, int]]]] = {}
+# Decoded bytes from background prefetch thread; consumed by _load_image_pack on GL thread
+_IMAGE_DECODED_CACHE: dict[str, list[tuple[bytes, tuple[int, int]]]] = {}
+_IMAGE_PREFETCH_LOCK = threading.Lock()
 
 
 class _StylePreset(NamedTuple):
@@ -191,9 +195,48 @@ class ImageShowcase(BaseEffect):
 
     @classmethod
     def warm_cache(cls, ctx: moderngl.Context, cfg: dict) -> None:
-        """Preload and cache the resolved image pack for the current config."""
+        """Upload images to GPU.  If prefetch_async already decoded them, this
+        only does texture uploads (fast).  Otherwise falls back to full load."""
         image_dir = cls._resolve_image_dir(cfg)
         cls._load_image_pack(ctx, image_dir)
+
+    @classmethod
+    def prefetch_async(cls, cfg: dict) -> None:
+        """Decode images from disk into raw bytes on a background thread.
+
+        No OpenGL calls are made here.  When warm_cache (or _init) later calls
+        _load_image_pack on the GL thread, the bytes are already in memory and
+        only the fast GPU upload step remains.
+        """
+        image_dir = cls._resolve_image_dir(cfg)
+        cache_key = str(image_dir.resolve()) if image_dir.exists() else str(image_dir)
+        if cache_key in _IMAGE_PACK_CACHE or cache_key in _IMAGE_DECODED_CACHE:
+            return
+
+        def _decode() -> None:
+            exts = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tga'}
+            files: list[Path] = []
+            if image_dir.exists():
+                files = sorted(
+                    p for p in image_dir.rglob('*')
+                    if p.is_file() and p.suffix.lower() in exts
+                )
+            if not files:
+                return
+            shuffle(files)
+            decoded: list[tuple[bytes, tuple[int, int]]] = []
+            for path in files:
+                try:
+                    img = Image.open(path).convert('RGB').transpose(Image.FLIP_TOP_BOTTOM)
+                    decoded.append((img.tobytes(), img.size))
+                except Exception as exc:
+                    log.warning('ImageShowcase prefetch: failed %s: %s', path, exc)
+            with _IMAGE_PREFETCH_LOCK:
+                if cache_key not in _IMAGE_DECODED_CACHE:
+                    _IMAGE_DECODED_CACHE[cache_key] = decoded
+            log.info('ImageShowcase: prefetched %d images from %s', len(decoded), image_dir)
+
+        threading.Thread(target=_decode, daemon=True, name='img-prefetch').start()
 
     @classmethod
     def _resolve_image_dir(cls, cfg: dict) -> Path:
@@ -213,6 +256,30 @@ class ImageShowcase(BaseEffect):
             textures, sizes = _IMAGE_PACK_CACHE[cache_key]
             return textures, sizes
 
+        # Fast path: background prefetch already decoded the images to bytes.
+        # Only GL uploads remain, which are much faster than disk I/O.
+        with _IMAGE_PREFETCH_LOCK:
+            pre = _IMAGE_DECODED_CACHE.pop(cache_key, None)
+
+        if pre is not None:
+            textures: list[moderngl.Texture] = []
+            sizes: list[tuple[int, int]] = []
+            for raw_bytes, size in pre:
+                try:
+                    tex = ctx.texture(size, 3, raw_bytes)
+                    tex.filter = moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR
+                    tex.build_mipmaps()
+                    textures.append(tex)
+                    sizes.append(size)
+                except Exception as exc:
+                    log.warning('ImageShowcase: failed to upload prefetched image: %s', exc)
+            if textures:
+                _IMAGE_PACK_CACHE[cache_key] = (textures, sizes)
+                log.info('ImageShowcase: uploaded %d prefetched images from %s', len(textures), image_dir)
+                return textures, sizes
+            # fall through to full load if uploads all failed
+
+        # Slow path: decode and upload synchronously.
         exts = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tga'}
         files: list[Path] = []
         if image_dir.exists():
@@ -232,8 +299,8 @@ class ImageShowcase(BaseEffect):
 
         shuffle(files)
 
-        textures: list[moderngl.Texture] = []
-        sizes: list[tuple[int, int]] = []
+        textures = []
+        sizes = []
 
         for path in files:
             try:
