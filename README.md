@@ -5,8 +5,8 @@ A drop-in effect for [unicorn-viz](https://github.com/iDoMeteor/unicorn-viz).
 ## Description
 
 Loads still images from one directory and presents them as a full-screen,
-audio-reactive slideshow with Ken Burns motion, beat-aware crossfades, and
-subtle colour grading.
+audio-reactive slideshow with Ken Burns motion, beat-aware crossfades, ten
+presentation styles, and subtle colour grading.
 
 By default, it reads bundled images from `drop-ins/images-01/images/`.
 If `[effects.ImageShowcase].image_dir` is set, that path is used instead.
@@ -15,7 +15,9 @@ The configured path is an override, not an additional search path.
 ## Visual Features
 
 - Slow pan/zoom movement on each image
+- Shuffled image order on load
 - Soft beat-aware crossfades between slides
+- Ten rotating presentation styles
 - Mild audio-reactive colour grade and vignette
 - Recursive loading from one image directory
 
@@ -33,7 +35,7 @@ The configured path is an override, not an additional search path.
 [effects.ImageShowcase]
 image_dir = ""    # override path; empty = bundled images folder
 speed = 1.0
-mix_time = 8.0
+mix_time = 10.0
 ```
 
 ## Adding Images

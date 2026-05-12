@@ -2,7 +2,7 @@
 
 Loads still images from one directory and presents them as a full-screen,
 audio-reactive slideshow with slow Ken Burns motion, beat-aware crossfades,
-and subtle colour grading.
+and ten rotating presentation styles.
 
 Directory selection policy:
 - By default, images are loaded from `drop-ins/images-01/images/`.
@@ -12,7 +12,9 @@ Directory selection policy:
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
+from random import shuffle
 
 import moderngl
 from PIL import Image
@@ -20,6 +22,34 @@ from PIL import Image
 from unicornviz.effects.base import BaseEffect, AudioData
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _StylePreset:
+    name: str
+    mix_shape: str
+    zoom_a: float
+    zoom_b: float
+    drift_a: float
+    drift_b: float
+    color_mix: float
+    palette_spin: float
+    vignette: float
+    grain: float
+
+
+_STYLE_PRESETS: list[_StylePreset] = [
+    _StylePreset('soft', 'smoothstep', 0.06, 0.06, 0.10, 1.40, 0.06, 0.05, 0.20, 0.00),
+    _StylePreset('pulse', 'smoothstep', 0.08, 0.05, 0.20, 1.60, 0.10, 0.08, 0.24, 0.02),
+    _StylePreset('drift', 'linear', 0.04, 0.08, 0.28, 1.05, 0.05, 0.03, 0.18, 0.01),
+    _StylePreset('flash', 'hard', 0.05, 0.10, 0.40, 1.85, 0.12, 0.10, 0.22, 0.03),
+    _StylePreset('cinema', 'smoothstep', 0.03, 0.04, 0.08, 1.10, 0.04, 0.02, 0.28, 0.04),
+    _StylePreset('halo', 'smoothstep', 0.07, 0.07, 0.50, 1.30, 0.09, 0.12, 0.25, 0.05),
+    _StylePreset('split', 'split', 0.06, 0.06, 0.65, 1.75, 0.08, 0.07, 0.21, 0.02),
+    _StylePreset('glow', 'noise', 0.05, 0.05, 0.18, 1.95, 0.10, 0.09, 0.23, 0.06),
+    _StylePreset('dream', 'smoothstep', 0.09, 0.09, 0.12, 1.25, 0.14, 0.14, 0.30, 0.05),
+    _StylePreset('nervous', 'noise', 0.10, 0.11, 0.55, 2.20, 0.16, 0.11, 0.27, 0.08),
+]
 
 _VERT = """
 #version 330
@@ -43,6 +73,7 @@ uniform float iBass;
 uniform float iMid;
 uniform float iTreble;
 uniform float iMix;
+uniform int iStyle;
 in vec2 v_uv;
 out vec4 fragColor;
 
@@ -75,27 +106,50 @@ vec3 sampleSlide(sampler2D tex, vec2 uv, vec2 texSize, vec2 outSize, float t, fl
     return texture(tex, clamp(cuv, 0.0, 1.0)).rgb;
 }
 
+float styleBlend(float mixValue, vec2 uv, float noiseSeed) {
+    if (iStyle == 0) {
+        return smoothstep(0.0, 1.0, mixValue);
+    } else if (iStyle == 1) {
+        return smoothstep(0.08, 0.92, mixValue + sin(uv.y * 10.0) * 0.04);
+    } else if (iStyle == 2) {
+        return clamp(mixValue, 0.0, 1.0);
+    } else if (iStyle == 3) {
+        return step(0.5, mixValue);
+    } else if (iStyle == 4) {
+        return smoothstep(0.0, 1.0, mixValue * mixValue);
+    } else if (iStyle == 5) {
+        return smoothstep(0.12, 0.88, mixValue + 0.06 * sin(uv.x * 18.0));
+    } else if (iStyle == 6) {
+        return smoothstep(0.0, 1.0, mixValue + (noiseSeed - 0.5) * 0.06);
+    } else if (iStyle == 7) {
+        return smoothstep(0.0, 1.0, mixValue + 0.08 * sin(uv.x * 6.0 + uv.y * 4.0));
+    } else if (iStyle == 8) {
+        return smoothstep(0.0, 1.0, mixValue * 0.85 + 0.08 * sin(uv.y * 8.0));
+    }
+    return smoothstep(0.0, 1.0, mixValue + (noiseSeed - 0.5) * 0.12);
+}
+
 void main() {
     vec2 uv = v_uv;
     float t = iTime;
+    float stylePhase = float(iStyle) / 10.0;
 
-    float zoomA = 1.0 + 0.06 * sin(t * 0.21) + iBass * 0.04;
-    float zoomB = 1.0 + 0.06 * cos(t * 0.17) + iTreble * 0.04;
+    float zoomA = 1.0 + 0.04 * sin(t * (0.21 + stylePhase * 0.03)) + iBass * 0.04;
+    float zoomB = 1.0 + 0.04 * cos(t * (0.17 + stylePhase * 0.02)) + iTreble * 0.04;
 
     vec3 a = sampleSlide(texA, uv, texASize, iResolution, t, 0.1, zoomA);
     vec3 b = sampleSlide(texB, uv, texBSize, iResolution, t, 1.4, zoomB);
 
     float wipe = smoothstep(0.0, 1.0, iMix);
     float noise = fract(sin(dot(uv * 200.0, vec2(12.9898, 78.233))) * 43758.5453);
-    float blend = smoothstep(wipe - 0.14, wipe + 0.14, uv.x + (noise - 0.5) * 0.05);
+    float blend = styleBlend(wipe, uv, noise);
 
     vec3 col = mix(a, b, blend);
 
-    // Mild colour treatment so photos don't look too flat on stage.
-    col = mix(col, col * palette(t * 0.05 + uv.y * 0.25), 0.06 + iMid * 0.07);
+    col = mix(col, col * palette(t * (0.05 + stylePhase * 0.03) + uv.y * 0.25), 0.06 + iMid * 0.07);
 
     vec2 p = uv * 2.0 - 1.0;
-    float vig = 1.0 - dot(p, p) * 0.20;
+    float vig = 1.0 - dot(p, p) * (0.16 + stylePhase * 0.08);
     col *= vig;
 
     fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
@@ -113,7 +167,7 @@ class ImageShowcase(BaseEffect):
     def _init(self) -> None:
         self.parameters = {
             'speed': 1.0,
-            'mix_time': 8.0,
+            'mix_time': 10.0,
         }
 
         self._prog = self._make_program(_VERT, _FRAG)
@@ -128,6 +182,8 @@ class ImageShowcase(BaseEffect):
         self._bass = 0.0
         self._mid = 0.0
         self._treble = 0.0
+        self._style_index = 0
+        self._style_order: list[int] = list(range(len(_STYLE_PRESETS)))
 
         self._load_images()
 
@@ -157,10 +213,10 @@ class ImageShowcase(BaseEffect):
             self._next = 0
             return
 
+        shuffle(files)
+
         for path in files:
             try:
-                # PIL image rows are top-to-bottom, while OpenGL textures are
-                # sampled bottom-to-top by default. Flip once at upload time.
                 img = Image.open(path).convert('RGB').transpose(Image.FLIP_TOP_BOTTOM)
                 tex = self.ctx.texture(img.size, 3, img.tobytes())
                 tex.filter = moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR
@@ -177,6 +233,9 @@ class ImageShowcase(BaseEffect):
             self._sizes = [(1, 1)]
         self._current = 0
         self._next = 1 if len(self._textures) > 1 else 0
+        self._style_index = 0
+        self._style_order = list(range(len(_STYLE_PRESETS)))
+        shuffle(self._style_order)
         log.info('ImageShowcase: loaded %d images from %s', len(self._textures), image_dir)
 
     def update(self, dt: float, audio: AudioData) -> None:
@@ -197,6 +256,9 @@ class ImageShowcase(BaseEffect):
             self._timer = 0.0
             self._current = self._next
             self._next = (self._next + 1) % len(self._textures)
+            self._style_index = (self._style_index + 1) % len(self._style_order)
+            if self._style_index == 0:
+                shuffle(self._style_order)
             self._mix = 0.0
         else:
             self._mix = phase
@@ -213,6 +275,8 @@ class ImageShowcase(BaseEffect):
             except KeyError:
                 pass
 
+        style = _STYLE_PRESETS[self._style_order[self._style_index]]
+
         set_uniform('texA', 0)
         set_uniform('texB', 1)
         set_uniform('texASize', tuple(float(v) for v in self._sizes[self._current]))
@@ -223,6 +287,7 @@ class ImageShowcase(BaseEffect):
         set_uniform('iMid', self._mid)
         set_uniform('iTreble', self._treble)
         set_uniform('iMix', self._mix)
+        set_uniform('iStyle', int(self._style_order[self._style_index]))
 
         self._vao.render(moderngl.TRIANGLE_STRIP)
 
