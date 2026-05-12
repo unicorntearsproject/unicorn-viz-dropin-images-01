@@ -239,6 +239,13 @@ class ImageShowcase(BaseEffect):
         threading.Thread(target=_decode, daemon=True, name='img-prefetch').start()
 
     @classmethod
+    def prefetch_ready(cls, cfg: dict) -> bool:
+        """Return True when prefetch has decoded bytes ready for GL upload."""
+        image_dir = cls._resolve_image_dir(cfg)
+        cache_key = str(image_dir.resolve()) if image_dir.exists() else str(image_dir)
+        return cache_key in _IMAGE_DECODED_CACHE or cache_key in _IMAGE_PACK_CACHE
+
+    @classmethod
     def _resolve_image_dir(cls, cfg: dict) -> Path:
         override = str(cfg.get('image_dir', '')).strip()
         if override:
