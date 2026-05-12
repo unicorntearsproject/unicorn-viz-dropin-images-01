@@ -12,6 +12,10 @@ By default, it reads bundled images from `drop-ins/images-01/images/`.
 If `[effects.ImageShowcase].image_dir` is set, that path is used instead.
 The configured path is an override, not an additional search path.
 
+For best performance, keep source images at or below the target display
+resolution. Large source files can increase startup decode time even though
+the effect caches the decoded textures after warmup.
+
 ## Visual Features
 
 - Slow pan/zoom movement on each image

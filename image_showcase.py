@@ -24,6 +24,9 @@ from unicornviz.effects.base import BaseEffect, AudioData
 log = logging.getLogger(__name__)
 
 
+_IMAGE_PACK_CACHE: dict[str, tuple[list[moderngl.Texture], list[tuple[int, int]]]] = {}
+
+
 class _StylePreset(NamedTuple):
     name: str
     mix_shape: str
@@ -186,14 +189,30 @@ class ImageShowcase(BaseEffect):
 
         self._load_images()
 
-    def _image_dir(self) -> Path:
-        override = str(self.config.get('image_dir', '')).strip()
+    @classmethod
+    def warm_cache(cls, ctx: moderngl.Context, cfg: dict) -> None:
+        """Preload and cache the resolved image pack for the current config."""
+        image_dir = cls._resolve_image_dir(cfg)
+        cls._load_image_pack(ctx, image_dir)
+
+    @classmethod
+    def _resolve_image_dir(cls, cfg: dict) -> Path:
+        override = str(cfg.get('image_dir', '')).strip()
         if override:
             return Path(override).expanduser()
         return Path(__file__).resolve().parent / 'images'
 
-    def _load_images(self) -> None:
-        image_dir = self._image_dir()
+    @classmethod
+    def _load_image_pack(
+        cls,
+        ctx: moderngl.Context,
+        image_dir: Path,
+    ) -> tuple[list[moderngl.Texture], list[tuple[int, int]]]:
+        cache_key = str(image_dir.resolve()) if image_dir.exists() else str(image_dir)
+        if cache_key in _IMAGE_PACK_CACHE:
+            textures, sizes = _IMAGE_PACK_CACHE[cache_key]
+            return textures, sizes
+
         exts = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tga'}
         files: list[Path] = []
         if image_dir.exists():
@@ -204,38 +223,47 @@ class ImageShowcase(BaseEffect):
 
         if not files:
             log.warning('ImageShowcase: no images found in %s', image_dir)
-            tex = self.ctx.texture((1, 1), 3, bytes([255, 0, 255]))
+            tex = ctx.texture((1, 1), 3, bytes([255, 0, 255]))
             tex.filter = moderngl.LINEAR, moderngl.LINEAR
-            self._textures = [tex]
-            self._sizes = [(1, 1)]
-            self._current = 0
-            self._next = 0
-            return
+            textures = [tex]
+            sizes = [(1, 1)]
+            _IMAGE_PACK_CACHE[cache_key] = (textures, sizes)
+            return textures, sizes
 
         shuffle(files)
+
+        textures: list[moderngl.Texture] = []
+        sizes: list[tuple[int, int]] = []
 
         for path in files:
             try:
                 img = Image.open(path).convert('RGB').transpose(Image.FLIP_TOP_BOTTOM)
-                tex = self.ctx.texture(img.size, 3, img.tobytes())
+                tex = ctx.texture(img.size, 3, img.tobytes())
                 tex.filter = moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR
                 tex.build_mipmaps()
-                self._textures.append(tex)
-                self._sizes.append(img.size)
+                textures.append(tex)
+                sizes.append(img.size)
             except Exception as exc:
                 log.warning('ImageShowcase: failed to load %s: %s', path, exc)
 
-        if not self._textures:
-            tex = self.ctx.texture((1, 1), 3, bytes([255, 0, 255]))
+        if not textures:
+            tex = ctx.texture((1, 1), 3, bytes([255, 0, 255]))
             tex.filter = moderngl.LINEAR, moderngl.LINEAR
-            self._textures = [tex]
-            self._sizes = [(1, 1)]
+            textures = [tex]
+            sizes = [(1, 1)]
+
+        _IMAGE_PACK_CACHE[cache_key] = (textures, sizes)
+        log.info('ImageShowcase: loaded %d images from %s', len(textures), image_dir)
+        return textures, sizes
+
+    def _load_images(self) -> None:
+        image_dir = self._resolve_image_dir(self.config)
+        self._textures, self._sizes = self._load_image_pack(self.ctx, image_dir)
         self._current = 0
         self._next = 1 if len(self._textures) > 1 else 0
         self._style_index = 0
         self._style_order = list(range(len(_STYLE_PRESETS)))
         shuffle(self._style_order)
-        log.info('ImageShowcase: loaded %d images from %s', len(self._textures), image_dir)
 
     def update(self, dt: float, audio: AudioData) -> None:
         super().update(dt, audio)
@@ -291,8 +319,6 @@ class ImageShowcase(BaseEffect):
         self._vao.render(moderngl.TRIANGLE_STRIP)
 
     def destroy(self) -> None:
-        for tex in self._textures:
-            tex.release()
         self._vao.release()
         self._vbo.release()
         self._prog.release()
