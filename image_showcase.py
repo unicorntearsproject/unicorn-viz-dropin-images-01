@@ -12,9 +12,9 @@ Directory selection policy:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from pathlib import Path
 from random import shuffle
+from typing import NamedTuple
 
 import moderngl
 from PIL import Image
@@ -24,8 +24,7 @@ from unicornviz.effects.base import BaseEffect, AudioData
 log = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class _StylePreset:
+class _StylePreset(NamedTuple):
     name: str
     mix_shape: str
     zoom_a: float
