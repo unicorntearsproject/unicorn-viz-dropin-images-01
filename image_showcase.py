@@ -80,6 +80,7 @@ uniform float iMid;
 uniform float iTreble;
 uniform float iMix;
 uniform int iStyle;
+uniform float iZoom;
 in vec2 v_uv;
 out vec4 fragColor;
 
@@ -137,6 +138,7 @@ float styleBlend(float mixValue, vec2 uv, float noiseSeed) {
 
 void main() {
     vec2 uv = v_uv;
+    uv = (uv - 0.5) / max(iZoom, 0.01) + 0.5;
     float t = iTime;
     float stylePhase = float(iStyle) / 10.0;
 
@@ -174,6 +176,7 @@ class ImageShowcase(BaseEffect):
         self.parameters = {
             'speed': 1.0,
             'mix_time': 10.0,
+            'zoom': 1.0,
         }
 
         self._prog = self._make_program(_VERT, _FRAG)
@@ -389,6 +392,7 @@ class ImageShowcase(BaseEffect):
         set_uniform('iTreble', self._treble)
         set_uniform('iMix', self._mix)
         set_uniform('iStyle', int(self._style_order[self._style_index]))
+        set_uniform('iZoom', float(self.parameters['zoom']))
 
         self._vao.render(moderngl.TRIANGLE_STRIP)
 
