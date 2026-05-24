@@ -178,6 +178,7 @@ class ImageShowcase(BaseEffect):
             'mix_time': float(self.config.get('mix_time', 10.0)),
             'zoom': float(self.config.get('zoom', 1.0)),
         }
+        self.scale_when_framed = bool(self.config.get('scale_when_framed', True))
 
         self._prog = self._make_program(_VERT, _FRAG)
         self._vao, self._vbo = self._fullscreen_quad(self._prog)
