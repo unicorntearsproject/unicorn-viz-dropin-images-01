@@ -170,7 +170,7 @@ class ImageShowcase(BaseEffect):
 
     NAME = 'Image Showcase'
     AUTHOR = 'unicorn-viz drop-in'
-    TAGS = ['images', 'audio', 'slideshow', 'drop-in']
+    TAGS = ['media', 'images', 'slideshow']
 
     def _init(self) -> None:
         self.parameters = {
