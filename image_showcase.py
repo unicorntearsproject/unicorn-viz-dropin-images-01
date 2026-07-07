@@ -14,7 +14,6 @@ from __future__ import annotations
 import logging
 import threading
 from pathlib import Path
-from random import shuffle
 from typing import NamedTuple
 
 import moderngl
@@ -25,10 +24,37 @@ from unicornviz.effects.base import BaseEffect, AudioData
 log = logging.getLogger(__name__)
 
 
-_IMAGE_PACK_CACHE: dict[str, tuple[list[moderngl.Texture], list[tuple[int, int]]]] = {}
+# (textures, sizes, paths) aligned by index; paths let each instance restrict
+# playback to one directory group per activation.
+_IMAGE_PACK_CACHE: dict[str, tuple[list[moderngl.Texture], list[tuple[int, int]], list[str]]] = {}
 # Decoded bytes from background prefetch thread; consumed by _load_image_pack on GL thread
-_IMAGE_DECODED_CACHE: dict[str, list[tuple[bytes, tuple[int, int]]]] = {}
+_IMAGE_DECODED_CACHE: dict[str, list[tuple[bytes, tuple[int, int], str]]] = {}
 _IMAGE_PREFETCH_LOCK = threading.Lock()
+_IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tga'}
+
+
+def scan_groups(root: Path) -> list[list[Path]]:
+    """Directory-group playback: each subdirectory containing images is one
+    group; all loose images directly in ``root`` form one shared group. Returns
+    a list of non-empty groups (empty when no images). Pure/testable."""
+    if not root.exists() or not root.is_dir():
+        return []
+    groups: list[list[Path]] = []
+    loose: list[Path] = []
+    for entry in sorted(root.iterdir(), key=lambda p: p.name.lower()):
+        if entry.is_dir():
+            imgs = sorted(
+                (p for p in entry.rglob('*')
+                 if p.is_file() and p.suffix.lower() in _IMAGE_EXTS),
+                key=lambda p: str(p).lower(),
+            )
+            if imgs:
+                groups.append(imgs)
+        elif entry.is_file() and entry.suffix.lower() in _IMAGE_EXTS:
+            loose.append(entry)
+    if loose:
+        groups.append(loose)
+    return groups
 
 
 class _StylePreset(NamedTuple):
@@ -185,6 +211,9 @@ class ImageShowcase(BaseEffect):
 
         self._textures: list[moderngl.Texture] = []
         self._sizes: list[tuple[int, int]] = []
+        self._paths: list[str] = []
+        self._group_order: list[int] = []
+        self._order_pos = 0
         self._current = 0
         self._next = 0
         self._timer = 0.0
@@ -227,12 +256,11 @@ class ImageShowcase(BaseEffect):
                 )
             if not files:
                 return
-            shuffle(files)
-            decoded: list[tuple[bytes, tuple[int, int]]] = []
+            decoded: list[tuple[bytes, tuple[int, int], str]] = []
             for path in files:
                 try:
                     img = Image.open(path).convert('RGB').transpose(Image.FLIP_TOP_BOTTOM)
-                    decoded.append((img.tobytes(), img.size))
+                    decoded.append((img.tobytes(), img.size, str(path)))
                 except Exception as exc:
                     log.warning('ImageShowcase prefetch: failed %s: %s', path, exc)
             with _IMAGE_PREFETCH_LOCK:
@@ -261,11 +289,10 @@ class ImageShowcase(BaseEffect):
         cls,
         ctx: moderngl.Context,
         image_dir: Path,
-    ) -> tuple[list[moderngl.Texture], list[tuple[int, int]]]:
+    ) -> tuple[list[moderngl.Texture], list[tuple[int, int]], list[str]]:
         cache_key = str(image_dir.resolve()) if image_dir.exists() else str(image_dir)
         if cache_key in _IMAGE_PACK_CACHE:
-            textures, sizes = _IMAGE_PACK_CACHE[cache_key]
-            return textures, sizes
+            return _IMAGE_PACK_CACHE[cache_key]
 
         # Fast path: background prefetch already decoded the images to bytes.
         # Only GL uploads remain, which are much faster than disk I/O.
@@ -275,43 +302,43 @@ class ImageShowcase(BaseEffect):
         if pre is not None:
             textures: list[moderngl.Texture] = []
             sizes: list[tuple[int, int]] = []
-            for raw_bytes, size in pre:
+            paths: list[str] = []
+            for raw_bytes, size, path_str in pre:
                 try:
                     tex = ctx.texture(size, 3, raw_bytes)
                     tex.filter = moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR
                     tex.build_mipmaps()
                     textures.append(tex)
                     sizes.append(size)
+                    paths.append(path_str)
                 except Exception as exc:
                     log.warning('ImageShowcase: failed to upload prefetched image: %s', exc)
             if textures:
-                _IMAGE_PACK_CACHE[cache_key] = (textures, sizes)
+                _IMAGE_PACK_CACHE[cache_key] = (textures, sizes, paths)
                 log.info('ImageShowcase: uploaded %d prefetched images from %s', len(textures), image_dir)
-                return textures, sizes
+                return textures, sizes, paths
             # fall through to full load if uploads all failed
 
-        # Slow path: decode and upload synchronously.
-        exts = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tga'}
+        # Slow path: decode and upload synchronously (sorted; per-instance rng
+        # handles group selection + shuffling).
         files: list[Path] = []
         if image_dir.exists():
             files = sorted(
                 path for path in image_dir.rglob('*')
-                if path.is_file() and path.suffix.lower() in exts
+                if path.is_file() and path.suffix.lower() in _IMAGE_EXTS
             )
 
         if not files:
             log.warning('ImageShowcase: no images found in %s', image_dir)
             tex = ctx.texture((1, 1), 3, bytes([255, 0, 255]))
             tex.filter = moderngl.LINEAR, moderngl.LINEAR
-            textures = [tex]
-            sizes = [(1, 1)]
-            _IMAGE_PACK_CACHE[cache_key] = (textures, sizes)
-            return textures, sizes
-
-        shuffle(files)
+            result = ([tex], [(1, 1)], [''])
+            _IMAGE_PACK_CACHE[cache_key] = result
+            return result
 
         textures = []
         sizes = []
+        paths = []
 
         for path in files:
             try:
@@ -321,6 +348,7 @@ class ImageShowcase(BaseEffect):
                 tex.build_mipmaps()
                 textures.append(tex)
                 sizes.append(img.size)
+                paths.append(str(path))
             except Exception as exc:
                 log.warning('ImageShowcase: failed to load %s: %s', path, exc)
 
@@ -329,19 +357,56 @@ class ImageShowcase(BaseEffect):
             tex.filter = moderngl.LINEAR, moderngl.LINEAR
             textures = [tex]
             sizes = [(1, 1)]
+            paths = ['']
 
-        _IMAGE_PACK_CACHE[cache_key] = (textures, sizes)
+        _IMAGE_PACK_CACHE[cache_key] = (textures, sizes, paths)
         log.info('ImageShowcase: loaded %d images from %s', len(textures), image_dir)
-        return textures, sizes
+        return textures, sizes, paths
 
     def _load_images(self) -> None:
         image_dir = self._resolve_image_dir(self.config)
-        self._textures, self._sizes = self._load_image_pack(self.ctx, image_dir)
-        self._current = 0
-        self._next = 1 if len(self._textures) > 1 else 0
+        self._textures, self._sizes, self._paths = self._load_image_pack(self.ctx, image_dir)
         self._style_index = 0
-        self._style_order = list(range(len(_STYLE_PRESETS)))
-        shuffle(self._style_order)
+        self._style_order = [int(i) for i in self.rng.permutation(len(_STYLE_PRESETS))]
+        self._set_group_order(image_dir)
+
+    def _set_group_order(self, image_dir: Path) -> None:
+        """Pick one directory group at random and order its texture indices.
+
+        Each subdirectory is a group; all loose images are one shared group.
+        The whole pack is loaded (cached), but this instance only cycles the
+        chosen group's images, shuffled per activation.
+        """
+        n = len(self._textures)
+        indices = list(range(n))
+        groups = scan_groups(image_dir)
+        if groups and n > 0:
+            gi = int(self.rng.integers(len(groups)))
+            chosen = {str(p.resolve()) for p in groups[gi]}
+            picked = [i for i, p in enumerate(self._paths)
+                      if p and str(Path(p).resolve()) in chosen]
+            if picked:
+                indices = picked
+        self._group_order = [int(i) for i in self.rng.permutation(indices)] if indices else [0]
+        self._order_pos = 0
+        self._current = self._group_order[0]
+        self._next = self._group_order[1 % len(self._group_order)]
+
+    def _advance_group(self) -> None:
+        """Advance to the next image in the shuffled group (reshuffle on wrap)."""
+        if not self._group_order:
+            return
+        self._order_pos += 1
+        if self._order_pos >= len(self._group_order):
+            self._order_pos = 0
+            if len(self._group_order) > 1:
+                last = self._group_order[-1]
+                self._group_order = [int(i) for i in self.rng.permutation(self._group_order)]
+                if self._group_order[0] == last:
+                    self._group_order[0], self._group_order[-1] = (
+                        self._group_order[-1], self._group_order[0])
+        self._current = self._group_order[self._order_pos]
+        self._next = self._group_order[(self._order_pos + 1) % len(self._group_order)]
 
     def update(self, dt: float, audio: AudioData) -> None:
         super().update(dt, audio)
@@ -359,12 +424,11 @@ class ImageShowcase(BaseEffect):
 
         if phase >= 1.0:
             self._timer = 0.0
-            self._current = self._next
-            self._next = (self._next + 1) % len(self._textures)
+            self._mix = 0.0
+            self._advance_group()
             self._style_index = (self._style_index + 1) % len(self._style_order)
             if self._style_index == 0:
-                shuffle(self._style_order)
-            self._mix = 0.0
+                self._style_order = [int(i) for i in self.rng.permutation(len(_STYLE_PRESETS))]
         else:
             self._mix = phase
 
@@ -379,8 +443,6 @@ class ImageShowcase(BaseEffect):
                 self._prog[name].value = value
             except KeyError:
                 pass
-
-        style = _STYLE_PRESETS[self._style_order[self._style_index]]
 
         set_uniform('texA', 0)
         set_uniform('texB', 1)
