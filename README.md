@@ -1,5 +1,8 @@
 # images-01 — Image Showcase
 
+**Version 0.8.0**
+
+
 A drop-in effect for [unicorn-viz](https://github.com/iDoMeteor/unicorn-viz).
 
 ## Description
@@ -56,3 +59,7 @@ No dedicated hotkeys. Standard `+` / `-` adjust `speed`.
 ## Tags
 
 `images` · `audio` · `slideshow` · `drop-in`
+
+## Changelog
+
+- **0.8.0** — initial versioned release.
