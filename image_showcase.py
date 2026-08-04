@@ -11,7 +11,7 @@ Directory selection policy:
 """
 from __future__ import annotations
 
-__version__ = '0.8.0'
+__version__ = '0.8.1'
 
 import logging
 import threading
@@ -33,6 +33,30 @@ _IMAGE_PACK_CACHE: dict[str, tuple[list[moderngl.Texture], list[tuple[int, int]]
 _IMAGE_DECODED_CACHE: dict[str, list[tuple[bytes, tuple[int, int], str]]] = {}
 _IMAGE_PREFETCH_LOCK = threading.Lock()
 _IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tga'}
+# Safety caps: image_dir may point at an arbitrary user directory (a photo
+# library), and the pack cache is module-lifetime — without bounds that is
+# multi-GB RAM/VRAM growth. Oversized images are downscaled at decode.
+_MAX_PACK_IMAGES = 128
+_MAX_IMAGE_EDGE = 2048
+
+
+def _cap_files(files: 'list[Path]', image_dir: 'Path') -> 'list[Path]':
+    if len(files) > _MAX_PACK_IMAGES:
+        log.warning(
+            'ImageShowcase: %s has %d images — loading the first %d '
+            '(alphabetical); split into subdirectories for full coverage',
+            image_dir, len(files), _MAX_PACK_IMAGES,
+        )
+        return files[:_MAX_PACK_IMAGES]
+    return files
+
+
+def _decode_capped(path: 'Path') -> 'Image.Image':
+    """Decode one image, downscaled to the edge cap, GL-oriented."""
+    img = Image.open(path).convert('RGB')
+    if max(img.size) > _MAX_IMAGE_EDGE:
+        img.thumbnail((_MAX_IMAGE_EDGE, _MAX_IMAGE_EDGE))
+    return img.transpose(Image.FLIP_TOP_BOTTOM)
 
 
 def scan_groups(root: Path) -> list[list[Path]]:
@@ -258,10 +282,11 @@ class ImageShowcase(BaseEffect):
                 )
             if not files:
                 return
+            files = _cap_files(files, image_dir)
             decoded: list[tuple[bytes, tuple[int, int], str]] = []
             for path in files:
                 try:
-                    img = Image.open(path).convert('RGB').transpose(Image.FLIP_TOP_BOTTOM)
+                    img = _decode_capped(path)
                     decoded.append((img.tobytes(), img.size, str(path)))
                 except Exception as exc:
                     log.warning('ImageShowcase prefetch: failed %s: %s', path, exc)
@@ -342,9 +367,10 @@ class ImageShowcase(BaseEffect):
         sizes = []
         paths = []
 
+        files = _cap_files(files, image_dir)
         for path in files:
             try:
-                img = Image.open(path).convert('RGB').transpose(Image.FLIP_TOP_BOTTOM)
+                img = _decode_capped(path)
                 tex = ctx.texture(img.size, 3, img.tobytes())
                 tex.filter = moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR
                 tex.build_mipmaps()
