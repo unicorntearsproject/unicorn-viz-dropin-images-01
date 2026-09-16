@@ -11,7 +11,7 @@ Directory selection policy:
 """
 from __future__ import annotations
 
-__version__ = '0.8.1'
+__version__ = '0.9.0'
 
 import logging
 import threading
@@ -51,11 +51,25 @@ def _cap_files(files: 'list[Path]', image_dir: 'Path') -> 'list[Path]':
     return files
 
 
-def _decode_capped(path: 'Path') -> 'Image.Image':
+def _image_edge_cap(cfg: 'dict | None') -> int:
+    """``[images] max_image_edge`` (pixels, 256..8192), default 2048.
+
+    Lower it on a VRAM-tight machine: every image in the pack is decoded
+    and uploaded at up to this edge. Read at pack load, so a change lands
+    at the next launch (the pack cache is module-lifetime).
+    """
+    try:
+        raw = int((cfg or {}).get('max_image_edge', _MAX_IMAGE_EDGE) or _MAX_IMAGE_EDGE)
+    except (TypeError, ValueError):
+        raw = _MAX_IMAGE_EDGE
+    return max(256, min(8192, raw))
+
+
+def _decode_capped(path: 'Path', edge: int = _MAX_IMAGE_EDGE) -> 'Image.Image':
     """Decode one image, downscaled to the edge cap, GL-oriented."""
     img = Image.open(path).convert('RGB')
-    if max(img.size) > _MAX_IMAGE_EDGE:
-        img.thumbnail((_MAX_IMAGE_EDGE, _MAX_IMAGE_EDGE))
+    if max(img.size) > edge:
+        img.thumbnail((edge, edge))
     return img.transpose(Image.FLIP_TOP_BOTTOM)
 
 
@@ -257,7 +271,7 @@ class ImageShowcase(BaseEffect):
         """Upload images to GPU.  If prefetch_async already decoded them, this
         only does texture uploads (fast).  Otherwise falls back to full load."""
         image_dir = cls._resolve_image_dir(cfg)
-        cls._load_image_pack(ctx, image_dir)
+        cls._load_image_pack(ctx, image_dir, _image_edge_cap(cfg))
 
     @classmethod
     def prefetch_async(cls, cfg: dict) -> None:
@@ -268,6 +282,7 @@ class ImageShowcase(BaseEffect):
         only the fast GPU upload step remains.
         """
         image_dir = cls._resolve_image_dir(cfg)
+        edge = _image_edge_cap(cfg)
         cache_key = str(image_dir.resolve()) if image_dir.exists() else str(image_dir)
         if cache_key in _IMAGE_PACK_CACHE or cache_key in _IMAGE_DECODED_CACHE:
             return
@@ -286,7 +301,7 @@ class ImageShowcase(BaseEffect):
             decoded: list[tuple[bytes, tuple[int, int], str]] = []
             for path in files:
                 try:
-                    img = _decode_capped(path)
+                    img = _decode_capped(path, edge)
                     decoded.append((img.tobytes(), img.size, str(path)))
                 except Exception as exc:
                     log.warning('ImageShowcase prefetch: failed %s: %s', path, exc)
@@ -316,6 +331,7 @@ class ImageShowcase(BaseEffect):
         cls,
         ctx: moderngl.Context,
         image_dir: Path,
+        edge: int = _MAX_IMAGE_EDGE,
     ) -> tuple[list[moderngl.Texture], list[tuple[int, int]], list[str]]:
         cache_key = str(image_dir.resolve()) if image_dir.exists() else str(image_dir)
         if cache_key in _IMAGE_PACK_CACHE:
@@ -370,7 +386,7 @@ class ImageShowcase(BaseEffect):
         files = _cap_files(files, image_dir)
         for path in files:
             try:
-                img = _decode_capped(path)
+                img = _decode_capped(path, edge)
                 tex = ctx.texture(img.size, 3, img.tobytes())
                 tex.filter = moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR
                 tex.build_mipmaps()
@@ -393,7 +409,8 @@ class ImageShowcase(BaseEffect):
 
     def _load_images(self) -> None:
         image_dir = self._resolve_image_dir(self.config)
-        self._textures, self._sizes, self._paths = self._load_image_pack(self.ctx, image_dir)
+        self._textures, self._sizes, self._paths = self._load_image_pack(
+            self.ctx, image_dir, _image_edge_cap(self.config))
         self._style_index = 0
         self._style_order = [int(i) for i in self.rng.permutation(len(_STYLE_PRESETS))]
         self._set_group_order(image_dir)

@@ -1,6 +1,6 @@
 # images-01 — Image Showcase
 
-**Version 0.8.1**
+**Version 0.9.0**
 
 
 A drop-in effect for [unicorn-viz](https://github.com/iDoMeteor/unicorn-viz).
@@ -62,5 +62,6 @@ No dedicated hotkeys. Standard `+` / `-` adjust `speed`.
 
 ## Changelog
 
+- **0.9.0** — New `[images] max_image_edge` (256–8192, default 2048): the decode/upload cap per image, for VRAM-tight machines. Applies at the next launch. No config-editor row: the showcase is an effect, not a controller, and the cap is load-time only.
 - **0.8.1** — cache safety caps: at most 128 images per pack (logged when truncated) and images larger than 2048 px are downscaled at decode — pointing `image_dir` at a photo library previously grew RAM/VRAM unboundedly for the process lifetime.
 - **0.8.0** — initial versioned release.
